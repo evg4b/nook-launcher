@@ -553,8 +553,11 @@ fun LauncherApp(rescanTick: Int) {
         // (onEnded bumps wallpaperVersion, re-running this) — a continuous
         // shuffle. A 10-min safety timer also advances very long clips.
         val current = value
-        var next = aerials.random()
-        if (aerials.size > 1) while (next == current) next = aerials.random()
+        // First pick after a cold start: continue the clip whose last frame is
+        // already on screen (VideoFrame), so the restart is seamless.
+        var next = VideoFrame.saved?.uri?.takeIf { current == null && it in aerials }
+            ?: aerials.random()
+        if (current != null && aerials.size > 1) while (next == current) next = aerials.random()
         value = next
         delay(10 * 60_000L)
         wallpaperVersion++
@@ -636,7 +639,17 @@ fun LauncherApp(rescanTick: Int) {
             // TV GPU ~2/3 of every frame and pushed each focus animation to 30fps.
             Box(Modifier.fillMaxSize().graphicsLayer { compositingStrategy = CompositingStrategy.Offscreen }) {
                 if (!aerialActive && !localVideo) {
-                    if (wallpaperSharp != null) {
+                    // Aerials still loading (cold start) or offline: hold the last
+                    // shown frame rather than flashing the gradient.
+                    val lastFrame = VideoFrame.saved?.image?.takeIf { config.useBuiltinAerials }
+                    if (lastFrame != null) {
+                        Image(
+                            bitmap = lastFrame,
+                            contentDescription = null,
+                            contentScale = ContentScale.Crop,
+                            modifier = Modifier.fillMaxSize(),
+                        )
+                    } else if (wallpaperSharp != null) {
                         Image(
                             bitmap = wallpaperSharp,
                             contentDescription = null,
@@ -1384,6 +1397,16 @@ private fun VideoWallpaper(
     // of a hard cut or a half-buffered pop.
     val alpha = remember { androidx.compose.animation.core.Animatable(0f) }
     var firstFrameGen by remember { mutableIntStateOf(0) }
+    val currentUri by androidx.compose.runtime.rememberUpdatedState(uri)
+    // For the ON_PAUSE snapshot: the SurfaceView, and the clip whose frame is on
+    // it (null while a new clip is still preparing — its surface is stale/black).
+    // [dip]: this clip starts on a fresh video plane (cold start / return home),
+    // so enter it through black — see the first-frame effect.
+    val shown = remember {
+        object { var view: android.view.SurfaceView? = null; var uri: String? = null; var dip = false }
+    }
+    // Black over the cover, for the fade-through-black into a fresh plane.
+    val dark = remember { androidx.compose.animation.core.Animatable(0f) }
 
     // The ExoPlayer — and its hardware video decoder, surface and buffers — is
     // built when the launcher is visible (ON_START) and RELEASED the moment it's
@@ -1397,6 +1420,9 @@ private fun VideoWallpaper(
         fun build(): androidx.media3.exoplayer.ExoPlayer {
             val renderers = androidx.media3.exoplayer.DefaultRenderersFactory(context)
                 .setEnableDecoderFallback(true) // fall back to SW decoder on odd clips
+                // Codec callbacks instead of polling (default only on API 31+; TVs
+                // run older) — lets dynamic scheduling below sleep between frames.
+                .forceEnableMediaCodecAsynchronousQueueing()
             // Stream through a trust-all OkHttp client: Apple's sylvan.apple.com
             // serves a cert chain many TV trust stores can't validate ("Trust
             // anchor not found"), which fails the TLS handshake → the aerial never
@@ -1407,6 +1433,9 @@ private fun VideoWallpaper(
             val sourceFactory = androidx.media3.exoplayer.source.DefaultMediaSourceFactory(dataSource)
             return androidx.media3.exoplayer.ExoPlayer.Builder(context)
                 .setRenderersFactory(renderers)
+                // Wake the playback loop only when a renderer can make progress,
+                // not every 10ms: the wallpaper plays for hours, so idle CPU matters.
+                .experimentalSetDynamicSchedulingEnabled(true)
                 .setMediaSourceFactory(sourceFactory)
                 // A muted, non-interactive wallpaper never seeks, so the default
                 // 50s buffer just pins ~25-30MB of RAM. Trim it — but keep >=15s
@@ -1431,6 +1460,15 @@ private fun VideoWallpaper(
             when (event) {
                 androidx.lifecycle.Lifecycle.Event.ON_START ->
                     if (player == null) player = build()
+                // Leaving home: grab the frame on screen (the surface is still
+                // alive until ON_STOP) as the cover for when we come back.
+                androidx.lifecycle.Lifecycle.Event.ON_PAUSE -> {
+                    val p = player
+                    val view = shown.view
+                    if (p != null && view != null && shown.uri == currentUri) {
+                        VideoFrame.capture(context, view, currentUri, p.currentPosition)
+                    }
+                }
                 androidx.lifecycle.Lifecycle.Event.ON_STOP -> {
                     player?.let { runCatching { it.release() } }
                     player = null
@@ -1456,13 +1494,15 @@ private fun VideoWallpaper(
 
     // On release the cover is snapped back opaque so the NEXT visible state shows
     // the gradient (not a black hole) until the rebuilt player renders its frame.
-    LaunchedEffect(player == null) { if (player == null) alpha.snapTo(0f) }
+    LaunchedEffect(player == null) {
+        if (player == null) { alpha.snapTo(0f); dark.snapTo(0f) }
+    }
     LaunchedEffect(player, speed) { player?.setPlaybackSpeed(speed) }
 
     DisposableEffect(player) {
         val p = player ?: return@DisposableEffect onDispose { }
         val listener = object : androidx.media3.common.Player.Listener {
-            override fun onRenderedFirstFrame() { firstFrameGen++ }
+            override fun onRenderedFirstFrame() { shown.uri = currentUri; firstFrameGen++ }
             override fun onPlaybackStateChanged(state: Int) {
                 // Clip finished (loop off) → advance to the next aerial.
                 if (state == androidx.media3.common.Player.STATE_ENDED) onEnded()
@@ -1479,12 +1519,20 @@ private fun VideoWallpaper(
     // player too, so coming back from the background re-prepares on the fresh one.
     LaunchedEffect(player, uri) {
         val p = player ?: return@LaunchedEffect
+        shown.uri = null
         // Fade the current clip out before swapping (skipped on the first load, or
         // right after a rebuild, when the cover is already up).
+        // Cover already up (no clip on screen) → the player/plane is fresh.
+        shown.dip = alpha.value == 0f
         if (alpha.value > 0f) alpha.animateTo(0f, tween(450))
         val genBefore = firstFrameGen
+        // Returning to the clip we left: resume where its snapshot (the cover) was
+        // taken. A frame of any other clip is stale — drop it.
+        val saved = VideoFrame.saved
+        if (saved != null && saved.uri != uri) VideoFrame.saved = null
+        val resumeAt = if (saved?.uri == uri) saved.positionMs else 0L
         runCatching {
-            p.setMediaItem(androidx.media3.common.MediaItem.fromUri(uri))
+            p.setMediaItem(androidx.media3.common.MediaItem.fromUri(uri), resumeAt)
             p.prepare()
         }
         // Stall watchdog: if no frame has rendered in 2.5s (a dead/unreachable
@@ -1501,10 +1549,32 @@ private fun VideoWallpaper(
             onError()
         }
     }
-    // The new clip's first frame is on screen → fade it in slowly.
+    // The new clip's first frame is on screen → fade it in: slowly over the
+    // gradient, quickly over its own snapshot (the two frames nearly match).
     LaunchedEffect(firstFrameGen) {
-        if (firstFrameGen > 0) alpha.animateTo(1f, tween(1100))
+        if (firstFrameGen == 0) return@LaunchedEffect
+        val resumed = VideoFrame.saved?.uri == currentUri
+        // "First frame" means queued, not visible: TV SoCs route the SurfaceView
+        // to a hardware video plane (Realtek: "External Video Composer") that
+        // shows black for an unreported while after it connects. A straight
+        // crossfade flashed that black, so a fresh plane is entered through black:
+        // the cover dims out, holds dark until the clip has played a second
+        // (capped, in case playback stalls), then the video rises out of it —
+        // any leftover black lands where the screen is already dark.
+        val p = player
+        val start = p?.currentPosition ?: 0L
+        if (shown.dip) dark.animateTo(1f, tween(450))
+        if (p != null) {
+            kotlinx.coroutines.withTimeoutOrNull(3_000L) {
+                while (p.currentPosition - start < 1_000L) delay(50L)
+            }
+        }
+        alpha.animateTo(1f, tween(if (shown.dip) 900 else 1100))
+        dark.snapTo(0f)
+        // Snapshot used up: a later shuffle back to this clip starts fresh.
+        if (resumed) VideoFrame.saved = null
     }
+    val cover = VideoFrame.saved?.takeIf { it.uri == uri }?.image
     // SurfaceView, NOT TextureView: it's composited by the system (SurfaceFlinger)
     // on its own thread, so the video never stutters when the UI thread is busy
     // (grid scroll, focus animations) — a TextureView composites on the UI thread
@@ -1515,7 +1585,7 @@ private fun VideoWallpaper(
     Box(Modifier.fillMaxSize()) {
         androidx.compose.ui.viewinterop.AndroidView(
             modifier = Modifier.fillMaxSize(),
-            factory = { ctx -> android.view.SurfaceView(ctx) },
+            factory = { ctx -> android.view.SurfaceView(ctx).also { shown.view = it } },
             // Bind the surface to whichever player is current. Re-runs when the
             // player is rebuilt on return (the old, released one needs no cleanup);
             // a no-op when it's null after release.
@@ -1525,8 +1595,83 @@ private fun VideoWallpaper(
             Modifier
                 .fillMaxSize()
                 .graphicsLayer { this.alpha = 1f - alpha.value }
-                .background(coverBrush)
+                .then(if (cover == null) Modifier.background(coverBrush) else Modifier)
+        ) {
+            if (cover != null) {
+                Image(
+                    bitmap = cover,
+                    contentDescription = null,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.fillMaxSize(),
+                )
+            }
+            Box(
+                Modifier
+                    .fillMaxSize()
+                    .graphicsLayer { this.alpha = dark.value }
+                    .background(Color.Black)
+            )
+        }
+    }
+}
+
+/**
+ * The video wallpaper's last shown frame, with its clip and position, kept in
+ * memory and on disk. While the player (re)prepares — on returning home, or
+ * after a cold start — this frame covers the surface instead of the gradient,
+ * and the clip resumes from the same spot, so the hand-over is invisible.
+ */
+internal object VideoFrame {
+    class Saved(val uri: String, val positionMs: Long, val image: ImageBitmap)
+
+    var saved by mutableStateOf<Saved?>(null)
+    private const val FILE = "video_frame.jpg"
+    private const val PREFS = "video_frame"
+    private var restored = false
+
+    /** Cold start: reload the frame saved by the previous process. Main thread, ~10ms. */
+    fun restore(context: android.content.Context) {
+        // Once per process: an activity recreate() must not revive a used-up frame.
+        if (restored) return
+        restored = true
+        val prefs = context.getSharedPreferences(PREFS, android.content.Context.MODE_PRIVATE)
+        val uri = prefs.getString("uri", null) ?: return
+        val bmp = runCatching { BitmapFactory.decodeFile(File(context.filesDir, FILE).path) }
+            .getOrNull() ?: return
+        bmp.prepareToDraw()
+        saved = Saved(uri, prefs.getLong("pos", 0L), bmp.asImageBitmap())
+    }
+
+    fun capture(context: android.content.Context, view: android.view.SurfaceView, uri: String, positionMs: Long) {
+        // PixelCopy from a SurfaceView needs API 24; older TVs keep the gradient cover.
+        if (android.os.Build.VERSION.SDK_INT < 24 || view.width == 0 || view.height == 0) return
+        // Half resolution: under the scrim and a 250ms crossfade it's indistinguishable, at 1/4 the RAM.
+        val bmp = android.graphics.Bitmap.createBitmap(
+            view.width / 2, view.height / 2, android.graphics.Bitmap.Config.ARGB_8888
         )
+        val app = context.applicationContext
+        runCatching {
+            android.view.PixelCopy.request(view, bmp, { result ->
+                if (result != android.view.PixelCopy.SUCCESS) {
+                    android.util.Log.w("LiteTV", "wallpaper frame copy failed: $result")
+                    return@request
+                }
+                bmp.prepareToDraw()
+                saved = Saved(uri, positionMs, bmp.asImageBitmap())
+                kotlin.concurrent.thread(name = "video-frame") {
+                    // Runs as an app launches from home: don't compete with its startup.
+                    android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_BACKGROUND)
+                    runCatching {
+                        // Write-then-rename: a kill mid-write must not leave a torn JPEG.
+                        val tmp = File(app.filesDir, "$FILE.tmp")
+                        tmp.outputStream().use { bmp.compress(android.graphics.Bitmap.CompressFormat.JPEG, 85, it) }
+                        tmp.renameTo(File(app.filesDir, FILE))
+                        app.getSharedPreferences(PREFS, android.content.Context.MODE_PRIVATE).edit()
+                            .putString("uri", uri).putLong("pos", positionMs).apply()
+                    }
+                }
+            }, android.os.Handler(android.os.Looper.getMainLooper()))
+        }
     }
 }
 
