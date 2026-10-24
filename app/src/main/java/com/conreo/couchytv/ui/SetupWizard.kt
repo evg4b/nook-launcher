@@ -143,7 +143,7 @@ fun SetupWizard(onDone: () -> Unit, onVpnChosen: (String?) -> Unit) {
                                 Body(stringResource(R.string.wizard_gtv_intro))
                                 Body(stringResource(R.string.wizard_gtv_adb))
                                 CodeLine("adb connect ${ip ?: "<TV-IP>"}:5555")
-                                CodeLine("adb shell cmd package set-home-activity com.conreo.couchytv/.MainActivity")
+                                CodeLine("adb shell cmd package set-home-activity ${context.packageName}/${com.conreo.couchytv.MainActivity::class.java.name}")
                             }
                             1 -> {
                                 Body(stringResource(R.string.wizard_gtv_overlay))
