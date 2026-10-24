@@ -21,9 +21,6 @@ HSPLandroidx/compose/animation/**->**(**)**
 # --- TV Material 3 components used across every screen. ---
 HSPLandroidx/tv/material3/**->**(**)**
 
-# --- graphics-shapes: the squircle corner path built on every card. ---
-HSPLandroidx/graphics/shapes/**->**(**)**
-
 # --- Lifecycle + DataStore: read on startup. ---
 HSPLandroidx/lifecycle/**->**(**)**
 HSPLandroidx/datastore/**->**(**)**

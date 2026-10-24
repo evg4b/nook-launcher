@@ -2,6 +2,7 @@ package com.conreo.couchytv.ui
 
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.Column
@@ -58,7 +59,10 @@ fun AppCard(
     // it, using a short time window that expires on its own (a sticky flag
     // would eat the next legitimate press, since the release is delivered to
     // the menu's window and never comes back to this card).
-    val cardShape = SmoothCornerShape(LocalCornerRadius.current)
+    // Plain rounded rect, not a squircle path: tv-material's Surface clips,
+    // glows (setShadowLayer) and borders a Generic path outline the slow way
+    // every frame, which cost a weak TV GPU ~10ms per focus-animation frame.
+    val cardShape = RoundedCornerShape(LocalCornerRadius.current)
     var downAt by remember { mutableLongStateOf(0L) }
     var lastKeyDown by remember { mutableLongStateOf(0L) }
     var longPressAt by remember { mutableLongStateOf(0L) }

@@ -15,6 +15,10 @@ val ACCENTS = listOf(
     Color(0xFF78D9EC),
 )
 
+/** Frosted glass of the dock / status-bar panels: dark 70% + white 6% sheen
+ *  pre-flattened into one color, so each panel is a single rrect fill. */
+val GlassPanel = Color(0xB826282B)
+
 data class WallpaperPreset(val name: String, val colors: List<Color>)
 
 val WALLPAPERS = listOf(

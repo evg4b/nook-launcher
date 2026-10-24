@@ -613,9 +613,11 @@ fun LauncherApp(rescanTick: Int) {
             // Priority: built-in aerials > local video > photo > preset.
             val videoSpeed = VIDEO_SPEEDS[config.videoSpeed.coerceIn(0, VIDEO_SPEEDS.size - 1)]
             val aerial = aerialWallpaper
-            if (aerial != null && net.connected && !aerialError) {
+            val aerialActive = aerial != null && net.connected && !aerialError
+            val localVideo = config.useVideoWallpaper && config.videoUri.isNotEmpty()
+            if (aerialActive) {
                 VideoWallpaper(
-                    uri = aerial,
+                    uri = aerial!!,
                     speed = videoSpeed,
                     loop = false, // play once, then shuffle to the next aerial
                     coverBrush = presetBrush,
@@ -625,20 +627,37 @@ fun LauncherApp(rescanTick: Int) {
                     onEnded = { wallpaperVersion++ },
                     onError = { aerialError = true },
                 )
-            } else if (config.useVideoWallpaper && config.videoUri.isNotEmpty()) {
+            } else if (localVideo) {
                 VideoWallpaper(uri = config.videoUri, speed = videoSpeed, loop = true, coverBrush = presetBrush)
-            } else if (wallpaperSharp != null) {
-                Image(
-                    bitmap = wallpaperSharp,
-                    contentDescription = null,
-                    contentScale = ContentScale.Crop,
-                    modifier = Modifier.fillMaxSize(),
-                )
-            } else {
-                Box(Modifier.fillMaxSize().background(presetBrush))
+            }
+            // Static backdrop (photo/preset + scrim) in ONE cached offscreen layer:
+            // HWUI re-renders it only when it changes and otherwise composites a
+            // single texture. Drawn live, the two full-screen gradients cost a weak
+            // TV GPU ~2/3 of every frame and pushed each focus animation to 30fps.
+            Box(Modifier.fillMaxSize().graphicsLayer { compositingStrategy = CompositingStrategy.Offscreen }) {
+                if (!aerialActive && !localVideo) {
+                    if (wallpaperSharp != null) {
+                        Image(
+                            bitmap = wallpaperSharp,
+                            contentDescription = null,
+                            contentScale = ContentScale.Crop,
+                            modifier = Modifier.fillMaxSize(),
+                        )
+                    } else {
+                        Box(Modifier.fillMaxSize().background(presetBrush))
+                    }
+                }
+                when (config.scrimMode) {
+                    4 -> {} // off
+                    3 -> Box(Modifier.fillMaxSize().background(ScrimFull))
+                    2 -> Box(Modifier.fillMaxSize().background(ScrimBottom))
+                    1 -> Box(Modifier.fillMaxSize().background(ScrimTop))
+                    else -> Box(Modifier.fillMaxSize().background(ScrimTopBottom))
+                }
             }
             // Dock-expanded overlay: cheap pseudo-blur (tiny bitmap upscaled)
             // + dim, crossfaded. Works identically on every Android version.
+            // Kept outside the cached backdrop so its fade doesn't re-render it.
             val overlayAlpha by animateFloatAsState(
                 targetValue = if (dockExpanded) 1f else 0f,
                 // Matches the grid's 340ms rise — a 1s fade lagged far behind it.
@@ -660,13 +679,6 @@ fun LauncherApp(rescanTick: Int) {
                         .graphicsLayer { alpha = overlayAlpha }
                         .background(Color.Black.copy(alpha = 0.45f))
                 )
-            }
-            when (config.scrimMode) {
-                4 -> {} // off
-                3 -> Box(Modifier.fillMaxSize().background(ScrimFull))
-                2 -> Box(Modifier.fillMaxSize().background(ScrimBottom))
-                1 -> Box(Modifier.fillMaxSize().background(ScrimTop))
-                else -> Box(Modifier.fillMaxSize().background(ScrimTopBottom))
             }
 
             // Launch entrance: after the boot logo, wait a beat, then the glass
@@ -1253,9 +1265,7 @@ private fun DockGlassPanel(
             Box(
                 Modifier
                     .fillMaxSize()
-                    .clip(SmoothCornerShape(LocalCornerRadius.current + 14.dp))
-                    .background(Color(0xB3121418))
-                    .background(Color.White.copy(alpha = 0.06f))
+                    .background(GlassPanel, RoundedCornerShape(LocalCornerRadius.current + 14.dp))
             )
         }
         // Icons — on OPEN they vanish almost instantly (the rising grid takes
