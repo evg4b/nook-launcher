@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">Couchy Launcher</string>
+    <string name="app_name">Nook Launcher</string>
 
     <!-- Default category names (first install) -->
     <string name="cat_streaming">Streaming</string>
@@ -166,22 +166,22 @@
     <string name="rerun_wizard_sub">Default-launcher setup and first-run tips</string>
 
     <!-- Setup wizard -->
-    <string name="wizard_welcome_title">Welcome to Couchy Launcher</string>
+    <string name="wizard_welcome_title">Welcome to Nook Launcher</string>
     <string name="wizard_welcome_body">A lightweight, one-screen launcher: your apps grouped by section, your own wallpaper, and a clean status row with clock, network and VPN.</string>
-    <string name="wizard_privacy_body">Privacy note — nothing to grant: Couchy requests no location, no microphone, and runs no background services. Everything it needs was granted at install.</string>
+    <string name="wizard_privacy_body">Privacy note — nothing to grant: Nook requests no location, no microphone, and runs no background services. Everything it needs was granted at install.</string>
     <string name="wizard_home_title">Set as your home screen</string>
-    <string name="wizard_already_default">✓ Done — Couchy is already your default launcher on this device.</string>
+    <string name="wizard_already_default">✓ Done — Nook is already your default launcher on this device.</string>
     <string name="wizard_gtv_intro">This is a certified Google TV device. Google does not allow changing the home app from the on-screen settings, so pick one of these two methods:</string>
     <string name="wizard_gtv_adb">1 — ADB (recommended, one-time):\n• Settings &gt; System &gt; About &gt; click "Android TV OS build" 7 times to unlock Developer options\n• Settings &gt; System &gt; Developer options &gt; enable USB/Wireless debugging\n• From a computer on the same network, run:</string>
-    <string name="wizard_gtv_overlay">If the system launcher still overlays Couchy after that (seen on Hisense and others), find it and disable it — reversible with "pm enable" anytime:</string>
-    <string name="wizard_gtv_which">(Use whichever of the two launcher packages the first command reports. Only disable it AFTER confirming Couchy opens fine.)</string>
-    <string name="wizard_gtv_remap">2 — Button remap (no computer): install a button-remapper app (e.g. "Button Mapper" from the Play Store) and map the Home button to Couchy Launcher.</string>
+    <string name="wizard_gtv_overlay">If the system launcher still overlays Nook after that (seen on Hisense and others), find it and disable it — reversible with "pm enable" anytime:</string>
+    <string name="wizard_gtv_which">(Use whichever of the two launcher packages the first command reports. Only disable it AFTER confirming Nook opens fine.)</string>
+    <string name="wizard_gtv_remap">2 — Button remap (no computer): install a button-remapper app (e.g. "Button Mapper" from the Play Store) and map the Home button to Nook Launcher.</string>
     <string name="wizard_try_dialog">Try system dialog anyway</string>
     <string name="wizard_check_again">Check again</string>
     <string name="wizard_skip">Skip for now</string>
-    <string name="wizard_aosp_body">This device allows choosing a home app. Press the button below, pick Couchy Launcher in the system dialog and confirm (choose "Always" if asked).</string>
+    <string name="wizard_aosp_body">This device allows choosing a home app. Press the button below, pick Nook Launcher in the system dialog and confirm (choose "Always" if asked).</string>
     <string name="wizard_set_default">Set as default launcher</string>
-    <string name="wizard_no_dialog_hint">If no dialog appears: Android settings &gt; Apps &gt; Default apps &gt; Home app &gt; Couchy Launcher. Or simply press the Home button — Android will ask which launcher to use.</string>
+    <string name="wizard_no_dialog_hint">If no dialog appears: Android settings &gt; Apps &gt; Default apps &gt; Home app &gt; Nook Launcher. Or simply press the Home button — Android will ask which launcher to use.</string>
     <string name="wizard_vpn_title">VPN button</string>
     <string name="wizard_vpn_body">If you use a VPN app, pick it — the VPN button in the status bar will open it. Skip and the VPN button stays hidden (you can enable it later in Settings › Status bar).</string>
     <string name="wizard_vpn_none">No VPN app detected on this device.</string>
@@ -189,7 +189,7 @@
     <string name="wizard_done_title">You\'re all set</string>
     <string name="wizard_tips">Tips:\n• Hold OK on any app for options — move, hide, app info, force stop, uninstall\n• Press Up from the top row to reach VPN, network, clock and settings\n• The gear opens launcher settings: wallpaper, sections, display and more</string>
     <string name="wizard_rerun_note">You can rerun this wizard anytime from Settings &gt; About.</string>
-    <string name="wizard_start">Start using Couchy</string>
+    <string name="wizard_start">Start using Nook</string>
     <string name="wizard_no_chooser">This device has no home chooser — use the ADB method shown</string>
     <string name="cat_all_apps">All apps</string>
     <string name="all_apps_sub">Every installed app, filled automatically</string>
