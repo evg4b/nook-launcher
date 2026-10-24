@@ -8,7 +8,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.ui.draw.clip
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -39,9 +39,7 @@ fun StatusBar(
     // panel, corners follow the roundness setting.
     val cluster = if (glass) {
         Modifier
-            .clip(SmoothCornerShape(LocalCornerRadius.current))
-            .background(Color(0xB3121418))
-            .background(Color.White.copy(alpha = 0.06f))
+            .background(GlassPanel, RoundedCornerShape(LocalCornerRadius.current))
             .padding(horizontal = 12.dp, vertical = 4.dp)
     } else Modifier
     Row(
