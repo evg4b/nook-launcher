@@ -553,10 +553,22 @@ fun LauncherApp(rescanTick: Int) {
         // (onEnded bumps wallpaperVersion, re-running this) — a continuous
         // shuffle. A 10-min safety timer also advances very long clips.
         val current = value
-        var next = aerials.random()
-        if (aerials.size > 1) while (next == current) next = aerials.random()
+        // First pick after a cold start: continue the clip whose last frame is
+        // already on screen (VideoFrame), so the restart is seamless.
+        var next = VideoFrame.saved?.uri?.takeIf { current == null && it in aerials }
+            ?: aerials.random()
+        if (current != null && aerials.size > 1) while (next == current) next = aerials.random()
         value = next
-        delay(10 * 60_000L)
+        // Count on-screen time only: firing while another app was up swapped the
+        // clip behind the user's back, so home reopened on a new clip with no saved
+        // frame for it — the gradient flash again after any film over 10 minutes.
+        var shownMs = 0L
+        while (shownMs < 10 * 60_000L) {
+            delay(5_000L)
+            if (lifecycleOwner.lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.STARTED)) {
+                shownMs += 5_000L
+            }
+        }
         wallpaperVersion++
     }
 
@@ -636,7 +648,19 @@ fun LauncherApp(rescanTick: Int) {
             // TV GPU ~2/3 of every frame and pushed each focus animation to 30fps.
             Box(Modifier.fillMaxSize().graphicsLayer { compositingStrategy = CompositingStrategy.Offscreen }) {
                 if (!aerialActive && !localVideo) {
-                    if (wallpaperSharp != null) {
+                    // Aerials still loading (cold start) or offline: hold the last
+                    // shown frame rather than flashing the gradient.
+                    val lastFrame = VideoFrame.saved?.image?.takeIf { config.useBuiltinAerials }
+                    if (lastFrame != null) {
+                        Image(
+                            bitmap = lastFrame,
+                            contentDescription = null,
+                            contentScale = ContentScale.Crop,
+                            modifier = Modifier.fillMaxSize(),
+                        )
+                        // Same dim as the video cover, so its arrival isn't a step.
+                        Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = COVER_DIM)))
+                    } else if (wallpaperSharp != null) {
                         Image(
                             bitmap = wallpaperSharp,
                             contentDescription = null,
@@ -1336,27 +1360,50 @@ private fun PeekStrip(app: AppEntry, cardWidth: Dp, cardHeight: Dp, peekH: Dp) {
 }
 
 /**
- * Shared OkHttp client (built once, lazily) that accepts any TLS cert — used
- * ONLY to stream decorative aerial video. Apple's sylvan.apple.com serves a
- * chain many Android-TV trust stores reject, so normal validation kills the
- * wallpaper. No credentials or private data ever go over this client, so
- * skipping validation is acceptable. One instance for the whole app lifetime —
- * OkHttpDataSource never closes it, so sharing is safe.
+ * Shared OkHttp client for the aerial streams: the system trust store plus
+ * Apple's root. sylvan.apple.com chains to "Apple Root CA", which many
+ * Android-TV trust stores lack ("Trust anchor not found"), so the aerial never
+ * loaded. Adding just that root (res/raw/apple_root_ca.cer, SHA-256 B0:B1:73:0E…
+ * F0:24, valid to 2035) keeps full certificate and hostname checks on every
+ * host — trusting any cert let anyone on the network feed crafted video into
+ * the TV's (often unpatched) hardware decoder. One instance for the app
+ * lifetime: OkHttpDataSource never closes it, so sharing is safe.
  */
-private val trustAllHttpClient: okhttp3.OkHttpClient by lazy {
-    val trustAll = object : javax.net.ssl.X509TrustManager {
-        override fun checkClientTrusted(c: Array<java.security.cert.X509Certificate>?, a: String?) {}
-        override fun checkServerTrusted(c: Array<java.security.cert.X509Certificate>?, a: String?) {}
-        override fun getAcceptedIssuers() = arrayOf<java.security.cert.X509Certificate>()
+private var aerialHttp: okhttp3.OkHttpClient? = null
+
+private fun aerialHttpClient(context: android.content.Context): okhttp3.OkHttpClient = aerialHttp ?: run {
+    fun trustManager(keyStore: java.security.KeyStore?) =
+        javax.net.ssl.TrustManagerFactory.getInstance(javax.net.ssl.TrustManagerFactory.getDefaultAlgorithm())
+            .apply { init(keyStore) }
+            .trustManagers.filterIsInstance<javax.net.ssl.X509TrustManager>().first()
+    val system = trustManager(null)
+    val apple = trustManager(java.security.KeyStore.getInstance(java.security.KeyStore.getDefaultType()).apply {
+        load(null, null)
+        val cert = context.resources.openRawResource(com.conreo.couchytv.R.raw.apple_root_ca).use {
+            java.security.cert.CertificateFactory.getInstance("X.509").generateCertificate(it)
+        }
+        setCertificateEntry("apple-root-ca", cert)
+    })
+    val trust = object : javax.net.ssl.X509TrustManager {
+        override fun checkClientTrusted(c: Array<java.security.cert.X509Certificate>, a: String) =
+            system.checkClientTrusted(c, a)
+        override fun checkServerTrusted(c: Array<java.security.cert.X509Certificate>, a: String) {
+            try {
+                system.checkServerTrusted(c, a)
+            } catch (e: java.security.cert.CertificateException) {
+                apple.checkServerTrusted(c, a)
+            }
+        }
+        override fun getAcceptedIssuers() = system.acceptedIssuers + apple.acceptedIssuers
     }
     val ctx = javax.net.ssl.SSLContext.getInstance("TLS")
-    ctx.init(null, arrayOf<javax.net.ssl.TrustManager>(trustAll), java.security.SecureRandom())
+    ctx.init(null, arrayOf<javax.net.ssl.TrustManager>(trust), null)
     okhttp3.OkHttpClient.Builder()
-        .sslSocketFactory(ctx.socketFactory, trustAll)
-        .hostnameVerifier { _, _ -> true }
+        .sslSocketFactory(ctx.socketFactory, trust)
         .connectTimeout(20, java.util.concurrent.TimeUnit.SECONDS)
         .readTimeout(20, java.util.concurrent.TimeUnit.SECONDS)
         .build()
+        .also { aerialHttp = it }
 }
 
 /**
@@ -1384,6 +1431,18 @@ private fun VideoWallpaper(
     // of a hard cut or a half-buffered pop.
     val alpha = remember { androidx.compose.animation.core.Animatable(0f) }
     var firstFrameGen by remember { mutableIntStateOf(0) }
+    val currentUri by androidx.compose.runtime.rememberUpdatedState(uri)
+    // For the ON_PAUSE snapshot: the SurfaceView, and the clip whose frame is on
+    // it (null while a new clip is still preparing — its surface is stale/black).
+    // [dip]: this clip starts on a fresh video plane (cold start / return home),
+    // so it gets the dimmed hold — see the first-frame effect.
+    val shown = remember {
+        object { var view: android.view.SurfaceView? = null; var uri: String? = null; var dip = false }
+    }
+    // Dim over the cover while a fresh plane warms up (0 = clear, 1 = black).
+    // Starts dimmed: the first clip after a cold start is on a fresh plane too.
+    val dark = remember { androidx.compose.animation.core.Animatable(COVER_DIM) }
+    val scope = rememberCoroutineScope()
 
     // The ExoPlayer — and its hardware video decoder, surface and buffers — is
     // built when the launcher is visible (ON_START) and RELEASED the moment it's
@@ -1396,24 +1455,36 @@ private fun VideoWallpaper(
     DisposableEffect(lifecycleOwner) {
         fun build(): androidx.media3.exoplayer.ExoPlayer {
             val renderers = androidx.media3.exoplayer.DefaultRenderersFactory(context)
-                .setEnableDecoderFallback(true) // fall back to SW decoder on odd clips
-            // Stream through a trust-all OkHttp client: Apple's sylvan.apple.com
-            // serves a cert chain many TV trust stores can't validate ("Trust
-            // anchor not found"), which fails the TLS handshake → the aerial never
-            // loads (black). Scoped to the wallpaper player only; it fetches
-            // nothing but decorative public video, so there's no data to protect.
-            val http = androidx.media3.datasource.okhttp.OkHttpDataSource.Factory(trustAllHttpClient)
+                // Hardware decoders only: a software 1080p decode would quietly eat
+                // several A55 cores for a background picture. With no HW decoder
+                // free (or none for the format) the clip errors out and the cover
+                // — last frame or gradient — stays instead.
+                .setMediaCodecSelector { mime, secure, tunneling ->
+                    androidx.media3.exoplayer.mediacodec.MediaCodecSelector.DEFAULT
+                        .getDecoderInfos(mime, secure, tunneling)
+                        .filterNot { it.softwareOnly }
+                }
+                .setEnableDecoderFallback(true) // next HW decoder if the first fails to init
+                // Codec callbacks instead of polling (default only on API 31+; TVs
+                // run older) — lets dynamic scheduling below sleep between frames.
+                .forceEnableMediaCodecAsynchronousQueueing()
+            // System trust + Apple's root: see aerialHttpClient.
+            val http = androidx.media3.datasource.okhttp.OkHttpDataSource.Factory(aerialHttpClient(context))
             val dataSource = androidx.media3.datasource.DefaultDataSource.Factory(context, http)
             val sourceFactory = androidx.media3.exoplayer.source.DefaultMediaSourceFactory(dataSource)
             return androidx.media3.exoplayer.ExoPlayer.Builder(context)
                 .setRenderersFactory(renderers)
+                // Wake the playback loop only when a renderer can make progress,
+                // not every 10ms: the wallpaper plays for hours, so idle CPU matters.
+                .experimentalSetDynamicSchedulingEnabled(true)
                 .setMediaSourceFactory(sourceFactory)
                 // A muted, non-interactive wallpaper never seeks, so the default
                 // 50s buffer just pins ~25-30MB of RAM. Trim it — but keep >=15s
                 // max so a slow TV network doesn't rebuffer visibly on the loop.
+                // Start after 1s buffered (not 2.5s): returning home waits on it.
                 .setLoadControl(
                     androidx.media3.exoplayer.DefaultLoadControl.Builder()
-                        .setBufferDurationsMs(10_000, 15_000, 2_500, 5_000)
+                        .setBufferDurationsMs(10_000, 15_000, 1_000, 5_000)
                         .setPrioritizeTimeOverSizeThresholds(true)
                         .build()
                 )
@@ -1431,9 +1502,23 @@ private fun VideoWallpaper(
             when (event) {
                 androidx.lifecycle.Lifecycle.Event.ON_START ->
                     if (player == null) player = build()
+                // Leaving home: grab the frame on screen (the surface is still
+                // alive until ON_STOP) as the cover for when we come back.
+                androidx.lifecycle.Lifecycle.Event.ON_PAUSE -> {
+                    val p = player
+                    val view = shown.view
+                    if (p != null && view != null && shown.uri == currentUri) {
+                        VideoFrame.capture(context, view, currentUri, p.currentPosition)
+                    }
+                }
                 androidx.lifecycle.Lifecycle.Event.ON_STOP -> {
                     player?.let { runCatching { it.release() } }
                     player = null
+                    // Raise the cover right here, not in an effect keyed on
+                    // `player == null`: that needed a recomposition to land between
+                    // ON_STOP and the ON_START rebuild, or home would reopen with
+                    // the cover clear over the empty (black) video plane.
+                    scope.launch { alpha.snapTo(0f); dark.snapTo(COVER_DIM) }
                 }
                 else -> {}
             }
@@ -1454,15 +1539,12 @@ private fun VideoWallpaper(
         }
     }
 
-    // On release the cover is snapped back opaque so the NEXT visible state shows
-    // the gradient (not a black hole) until the rebuilt player renders its frame.
-    LaunchedEffect(player == null) { if (player == null) alpha.snapTo(0f) }
     LaunchedEffect(player, speed) { player?.setPlaybackSpeed(speed) }
 
     DisposableEffect(player) {
         val p = player ?: return@DisposableEffect onDispose { }
         val listener = object : androidx.media3.common.Player.Listener {
-            override fun onRenderedFirstFrame() { firstFrameGen++ }
+            override fun onRenderedFirstFrame() { shown.uri = currentUri; firstFrameGen++ }
             override fun onPlaybackStateChanged(state: Int) {
                 // Clip finished (loop off) → advance to the next aerial.
                 if (state == androidx.media3.common.Player.STATE_ENDED) onEnded()
@@ -1479,12 +1561,22 @@ private fun VideoWallpaper(
     // player too, so coming back from the background re-prepares on the fresh one.
     LaunchedEffect(player, uri) {
         val p = player ?: return@LaunchedEffect
+        shown.uri = null
         // Fade the current clip out before swapping (skipped on the first load, or
         // right after a rebuild, when the cover is already up).
+        // Cover already up (no clip on screen) → the player/plane is fresh.
+        shown.dip = alpha.value == 0f
+        // A clip-to-clip swap stays on the live plane: plain fade, no dim.
+        if (!shown.dip) dark.snapTo(0f)
         if (alpha.value > 0f) alpha.animateTo(0f, tween(450))
         val genBefore = firstFrameGen
+        // Returning to the clip we left: resume where its snapshot (the cover) was
+        // taken. A frame of any other clip is stale — drop it.
+        val saved = VideoFrame.saved
+        if (saved != null && saved.uri != uri) VideoFrame.saved = null
+        val resumeAt = if (saved?.uri == uri) saved.positionMs else 0L
         runCatching {
-            p.setMediaItem(androidx.media3.common.MediaItem.fromUri(uri))
+            p.setMediaItem(androidx.media3.common.MediaItem.fromUri(uri), resumeAt)
             p.prepare()
         }
         // Stall watchdog: if no frame has rendered in 2.5s (a dead/unreachable
@@ -1501,10 +1593,32 @@ private fun VideoWallpaper(
             onError()
         }
     }
-    // The new clip's first frame is on screen → fade it in slowly.
+    // The new clip's first frame is queued → reveal it (see below for why not at once).
     LaunchedEffect(firstFrameGen) {
-        if (firstFrameGen > 0) alpha.animateTo(1f, tween(1100))
+        if (firstFrameGen == 0) return@LaunchedEffect
+        val resumed = VideoFrame.saved?.uri == currentUri
+        // "First frame" means queued, not visible: TV SoCs route the SurfaceView
+        // to a hardware video plane (Realtek: "External Video Composer") that
+        // shows black for an unreported while after it connects. A straight
+        // crossfade flashed that black, and fading through full black read as a
+        // black blink too. So on a fresh plane the still frame (already slightly
+        // dimmed, see COVER_DIM) stays until the clip has played 1s (capped, in
+        // case playback stalls), then the video fades in over it in full colour.
+        // (A 0.4s hold still showed the black; 1.5s + a 1s fade felt slow.)
+        val p = player ?: return@LaunchedEffect
+        val start = p.currentPosition
+        kotlinx.coroutines.withTimeoutOrNull(3_000L) {
+            while (p.currentPosition - start < 1_000L) delay(50L)
+        }
+        // Left home meanwhile (player released, cover re-raised): don't lift
+        // the cover off the next player before its own first frame.
+        if (player !== p) return@LaunchedEffect
+        alpha.animateTo(1f, tween(if (shown.dip) 700 else 1100))
+        dark.snapTo(0f)
+        // Snapshot used up: a later shuffle back to this clip starts fresh.
+        if (resumed) VideoFrame.saved = null
     }
+    val cover = VideoFrame.saved?.takeIf { it.uri == uri }?.image
     // SurfaceView, NOT TextureView: it's composited by the system (SurfaceFlinger)
     // on its own thread, so the video never stutters when the UI thread is busy
     // (grid scroll, focus animations) — a TextureView composites on the UI thread
@@ -1515,7 +1629,7 @@ private fun VideoWallpaper(
     Box(Modifier.fillMaxSize()) {
         androidx.compose.ui.viewinterop.AndroidView(
             modifier = Modifier.fillMaxSize(),
-            factory = { ctx -> android.view.SurfaceView(ctx) },
+            factory = { ctx -> android.view.SurfaceView(ctx).also { shown.view = it } },
             // Bind the surface to whichever player is current. Re-runs when the
             // player is rebuilt on return (the old, released one needs no cleanup);
             // a no-op when it's null after release.
@@ -1525,8 +1639,90 @@ private fun VideoWallpaper(
             Modifier
                 .fillMaxSize()
                 .graphicsLayer { this.alpha = 1f - alpha.value }
-                .background(coverBrush)
+                .then(if (cover == null) Modifier.background(coverBrush) else Modifier)
+        ) {
+            if (cover != null) {
+                Image(
+                    bitmap = cover,
+                    contentDescription = null,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.fillMaxSize(),
+                )
+            }
+            Box(
+                Modifier
+                    .fillMaxSize()
+                    .graphicsLayer { this.alpha = dark.value }
+                    .background(Color.Black)
+            )
+        }
+    }
+}
+
+/**
+ * How dark the cover sits over a fresh video plane, from its very first frame:
+ * the video then fades in to full colour over a slightly dimmed still. Animating
+ * the dim in front of the user read as a separate "darkening" step.
+ */
+private const val COVER_DIM = 0.25f
+
+/**
+ * The video wallpaper's last shown frame, with its clip and position, kept in
+ * memory and on disk. While the player (re)prepares — on returning home, or
+ * after a cold start — this frame covers the surface instead of the gradient,
+ * and the clip resumes from the same spot, so the hand-over is invisible.
+ */
+internal object VideoFrame {
+    class Saved(val uri: String, val positionMs: Long, val image: ImageBitmap)
+
+    var saved by mutableStateOf<Saved?>(null)
+    private const val FILE = "video_frame.jpg"
+    private const val PREFS = "video_frame"
+    private var restored = false
+
+    /** Cold start: reload the frame saved by the previous process. Main thread, ~10ms. */
+    fun restore(context: android.content.Context) {
+        // Once per process: an activity recreate() must not revive a used-up frame.
+        if (restored) return
+        restored = true
+        val prefs = context.getSharedPreferences(PREFS, android.content.Context.MODE_PRIVATE)
+        val uri = prefs.getString("uri", null) ?: return
+        val bmp = runCatching { BitmapFactory.decodeFile(File(context.filesDir, FILE).path) }
+            .getOrNull() ?: return
+        bmp.prepareToDraw()
+        saved = Saved(uri, prefs.getLong("pos", 0L), bmp.asImageBitmap())
+    }
+
+    fun capture(context: android.content.Context, view: android.view.SurfaceView, uri: String, positionMs: Long) {
+        // PixelCopy from a SurfaceView needs API 24; older TVs keep the gradient cover.
+        if (android.os.Build.VERSION.SDK_INT < 24 || view.width == 0 || view.height == 0) return
+        // Half resolution: under the scrim and the fade through black it's indistinguishable, at 1/4 the RAM.
+        val bmp = android.graphics.Bitmap.createBitmap(
+            view.width / 2, view.height / 2, android.graphics.Bitmap.Config.ARGB_8888
         )
+        val app = context.applicationContext
+        runCatching {
+            android.view.PixelCopy.request(view, bmp, { result ->
+                if (result != android.view.PixelCopy.SUCCESS) {
+                    android.util.Log.w("LiteTV", "wallpaper frame copy failed: $result")
+                    return@request
+                }
+                bmp.prepareToDraw()
+                saved = Saved(uri, positionMs, bmp.asImageBitmap())
+                kotlin.concurrent.thread(name = "video-frame") {
+                    // Runs as an app launches from home: don't compete with its startup.
+                    android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_BACKGROUND)
+                    runCatching {
+                        // Write-then-rename: a kill mid-write must not leave a torn JPEG.
+                        val tmp = File(app.filesDir, "$FILE.tmp")
+                        tmp.outputStream().use { bmp.compress(android.graphics.Bitmap.CompressFormat.JPEG, 85, it) }
+                        tmp.renameTo(File(app.filesDir, FILE))
+                        app.getSharedPreferences(PREFS, android.content.Context.MODE_PRIVATE).edit()
+                            .putString("uri", uri).putLong("pos", positionMs).apply()
+                    }
+                }
+            }, android.os.Handler(android.os.Looper.getMainLooper()))
+        }
     }
 }
 

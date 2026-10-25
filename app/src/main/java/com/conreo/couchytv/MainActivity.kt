@@ -48,6 +48,8 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // Before the first frame, so a video wallpaper starts on its last frame, not the gradient.
+        com.conreo.couchytv.ui.VideoFrame.restore(this)
 
         // A home screen never exits on Back
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
