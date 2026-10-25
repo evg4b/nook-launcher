@@ -1481,9 +1481,10 @@ private fun VideoWallpaper(
                 // A muted, non-interactive wallpaper never seeks, so the default
                 // 50s buffer just pins ~25-30MB of RAM. Trim it — but keep >=15s
                 // max so a slow TV network doesn't rebuffer visibly on the loop.
+                // Start after 1s buffered (not 2.5s): returning home waits on it.
                 .setLoadControl(
                     androidx.media3.exoplayer.DefaultLoadControl.Builder()
-                        .setBufferDurationsMs(10_000, 15_000, 2_500, 5_000)
+                        .setBufferDurationsMs(10_000, 15_000, 1_000, 5_000)
                         .setPrioritizeTimeOverSizeThresholds(true)
                         .build()
                 )
@@ -1601,17 +1602,18 @@ private fun VideoWallpaper(
         // shows black for an unreported while after it connects. A straight
         // crossfade flashed that black, and fading through full black read as a
         // black blink too. So on a fresh plane the still frame (already slightly
-        // dimmed, see COVER_DIM) stays until the clip has played 1.5s (capped, in
+        // dimmed, see COVER_DIM) stays until the clip has played 1s (capped, in
         // case playback stalls), then the video fades in over it in full colour.
+        // (A 0.4s hold still showed the black; 1.5s + a 1s fade felt slow.)
         val p = player ?: return@LaunchedEffect
         val start = p.currentPosition
-        kotlinx.coroutines.withTimeoutOrNull(4_000L) {
-            while (p.currentPosition - start < 1_500L) delay(50L)
+        kotlinx.coroutines.withTimeoutOrNull(3_000L) {
+            while (p.currentPosition - start < 1_000L) delay(50L)
         }
         // Left home meanwhile (player released, cover re-raised): don't lift
         // the cover off the next player before its own first frame.
         if (player !== p) return@LaunchedEffect
-        alpha.animateTo(1f, tween(if (shown.dip) 1_000 else 1100))
+        alpha.animateTo(1f, tween(if (shown.dip) 700 else 1100))
         dark.snapTo(0f)
         // Snapshot used up: a later shuffle back to this clip starts fresh.
         if (resumed) VideoFrame.saved = null
