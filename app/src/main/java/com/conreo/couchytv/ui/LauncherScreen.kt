@@ -658,6 +658,8 @@ fun LauncherApp(rescanTick: Int) {
                             contentScale = ContentScale.Crop,
                             modifier = Modifier.fillMaxSize(),
                         )
+                        // Same dim as the video cover, so its arrival isn't a step.
+                        Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = COVER_DIM)))
                     } else if (wallpaperSharp != null) {
                         Image(
                             bitmap = wallpaperSharp,
@@ -1433,12 +1435,13 @@ private fun VideoWallpaper(
     // For the ON_PAUSE snapshot: the SurfaceView, and the clip whose frame is on
     // it (null while a new clip is still preparing — its surface is stale/black).
     // [dip]: this clip starts on a fresh video plane (cold start / return home),
-    // so enter it through a dimmed hold — see the first-frame effect.
+    // so it gets the dimmed hold — see the first-frame effect.
     val shown = remember {
         object { var view: android.view.SurfaceView? = null; var uri: String? = null; var dip = false }
     }
     // Dim over the cover while a fresh plane warms up (0 = clear, 1 = black).
-    val dark = remember { androidx.compose.animation.core.Animatable(0f) }
+    // Starts dimmed: the first clip after a cold start is on a fresh plane too.
+    val dark = remember { androidx.compose.animation.core.Animatable(COVER_DIM) }
     val scope = rememberCoroutineScope()
 
     // The ExoPlayer — and its hardware video decoder, surface and buffers — is
@@ -1514,7 +1517,7 @@ private fun VideoWallpaper(
                     // `player == null`: that needed a recomposition to land between
                     // ON_STOP and the ON_START rebuild, or home would reopen with
                     // the cover clear over the empty (black) video plane.
-                    scope.launch { alpha.snapTo(0f); dark.snapTo(0f) }
+                    scope.launch { alpha.snapTo(0f); dark.snapTo(COVER_DIM) }
                 }
                 else -> {}
             }
@@ -1562,6 +1565,8 @@ private fun VideoWallpaper(
         // right after a rebuild, when the cover is already up).
         // Cover already up (no clip on screen) → the player/plane is fresh.
         shown.dip = alpha.value == 0f
+        // A clip-to-clip swap stays on the live plane: plain fade, no dim.
+        if (!shown.dip) dark.snapTo(0f)
         if (alpha.value > 0f) alpha.animateTo(0f, tween(450))
         val genBefore = firstFrameGen
         // Returning to the clip we left: resume where its snapshot (the cover) was
@@ -1595,12 +1600,11 @@ private fun VideoWallpaper(
         // to a hardware video plane (Realtek: "External Video Composer") that
         // shows black for an unreported while after it connects. A straight
         // crossfade flashed that black, and fading through full black read as a
-        // black blink too. So a fresh plane gets a dimmed hold: the still frame
-        // darkens halfway (never to black), stays until the clip has played 1.5s
-        // (capped, in case playback stalls), then the video fades in over it.
+        // black blink too. So on a fresh plane the still frame (already slightly
+        // dimmed, see COVER_DIM) stays until the clip has played 1.5s (capped, in
+        // case playback stalls), then the video fades in over it in full colour.
         val p = player ?: return@LaunchedEffect
         val start = p.currentPosition
-        if (shown.dip) dark.animateTo(0.5f, tween(600))
         kotlinx.coroutines.withTimeoutOrNull(4_000L) {
             while (p.currentPosition - start < 1_500L) delay(50L)
         }
@@ -1652,6 +1656,13 @@ private fun VideoWallpaper(
         }
     }
 }
+
+/**
+ * How dark the cover sits over a fresh video plane, from its very first frame:
+ * the video then fades in to full colour over a slightly dimmed still. Animating
+ * the dim in front of the user read as a separate "darkening" step.
+ */
+private const val COVER_DIM = 0.25f
 
 /**
  * The video wallpaper's last shown frame, with its clip and position, kept in
